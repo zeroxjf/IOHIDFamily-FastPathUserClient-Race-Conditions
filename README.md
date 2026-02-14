@@ -4,15 +4,9 @@
 
 Two race conditions in `IOHIDEventServiceFastPathUserClient` (IOHIDFamily kext). No entitlements required. Reachable from the normal app sandbox.
 
-**UAF — copyEvent race (sel2 vs sel1):** The close path (sel1) drops provider state and clears `+0x109` with no lock. copyEvent (sel2) checks a different flag (`+0x108`) under a per-connection lock, then calls into the provider. Multiple connections to the same provider means close and copyEvent operate in different locking domains on shared provider-side objects.
-
-**AOP panic — termination race (didTerminate vs sel0):** `mach_port_destroy` triggers async `didTerminate` → close/teardown, unsynchronized with concurrent sel0 open paths on other connections. This also saturates SPU-backed providers' mailbox, triggering AOP watchdog timeout.
-
 Both vectors use `IOServiceOpen(service, task, 2, &conn)`. The sel0 open gate checks for `FastPathHasEntitlement` and `FastPathMotionEventEntitlement` in the *caller-supplied* OSDictionary rather than the actual entitlement flags stored during `initWithTask` — any sandboxed app passes the gate by including those keys in the input struct.
 
-## Trigger code
-
-**UAF — copyEvent race:**
+## UAF — copyEvent race
 
 ```c
 // open 15 connections to the same IOHIDEventService provider
@@ -35,7 +29,9 @@ while (!stop) {
 }
 ```
 
-**AOP panic — termination race:**
+The close path (sel1) drops provider state and clears `+0x109` with no lock. copyEvent (sel2) checks a different flag (`+0x108`) under a per-connection lock, then calls into the provider. Multiple connections to the same provider means close and copyEvent operate in different locking domains on shared provider-side objects.
+
+## AOP panic — termination race
 
 ```c
 // pre-open 3 opener connections
@@ -69,6 +65,8 @@ while (!stop) {
     usleep(80000); // 80ms race window
 }
 ```
+
+`mach_port_destroy` triggers async `didTerminate` → close/teardown, unsynchronized with concurrent sel0 open paths on other connections. This also saturates SPU-backed providers' mailbox, triggering AOP watchdog timeout.
 
 ## Contents
 
