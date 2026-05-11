@@ -1,8 +1,16 @@
-# IOHIDFamily — FastPathUserClient Race Conditions
+# CVE-2026-28992: IOHIDFamily FastPathUserClient Race Conditions
 
-**CVE-2026-28992** — patched in iOS/iPadOS 26.5, credited to Johnny Franks (@zeroxjf). See [Apple security content](https://support.apple.com/en-us/127110).
+**[CVE-2026-28992](https://support.apple.com/en-us/127110)** | Author: [Johnny Franks (@zeroxjf)](https://x.com/zeroxjf)
 
-> **Warning:** Both PoCs will kernel panic / reboot your device. Save all work before running.
+> **Component:** IOHIDFamily
+>
+> **Impact:** An attacker may be able to cause unexpected app termination
+>
+> **Description:** A memory corruption vulnerability was addressed with improved locking.
+>
+> *— [Apple Security Content, iOS 26.5 and iPadOS 26.5](https://support.apple.com/en-us/127110)*
+
+**Both PoCs will kernel panic / reboot your device. Save your work.**
 
 Two race conditions in `IOHIDEventServiceFastPathUserClient` (IOHIDFamily kext). No entitlements required. Reachable from the normal app sandbox.
 
