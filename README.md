@@ -1,5 +1,7 @@
 # IOHIDFamily — FastPathUserClient Race Conditions
 
+**CVE-2026-28992** — patched in iOS/iPadOS 26.5, credited to Johnny Franks (@zeroxjf). See [Apple security content](https://support.apple.com/en-us/127110).
+
 > **Warning:** Both PoCs will kernel panic / reboot your device. Save all work before running.
 
 Two race conditions in `IOHIDEventServiceFastPathUserClient` (IOHIDFamily kext). No entitlements required. Reachable from the normal app sandbox.
